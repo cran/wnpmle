@@ -11,27 +11,36 @@ vignette: >
 knitr::opts_chunk$set(
   collapse  = TRUE,
   comment   = "#>",
-  fig.width = 5,
+  fig.width = 6,
   fig.height = 4.5
 )
 ```
 
 ## Overview
 
-The `wnpmle` package implements the **weighted nonparametric maximum likelihood
-estimator (wNPMLE)** for the marginal mean of recurrent events in the presence
-of a competing terminal event.
+The `wnpmle` package provides regression modeling for the marginal mean
+intensity of recurrent events in the presence of a competing terminal event
+for two large classes of semiparametric transformation models. The marginal
+mean intensity has a one-to-one correspondence with the marginal mean.
+Covariate effects are therefore directly interpretable with regard to the
+expected number of recurrences. Estimation is based on the weighted
+nonparametric maximum likelihood estimator (wNPMLE) by Bellach and Kosorok
+(2026), which extends the weighted NPMLE for competing risks (Bellach et al.,
+2019), and model selection is facilitated by the profile log-likelihood and
+the AIC.
 
-Competing events are commonly modeled as independent right-censorings, which
-leads to overestimation of the marginal mean of a recurrent event. `wnpmle`
-provides valid estimation and prediction via a weighted nonparametric maximum
-likelihood estimation for two broad classes of semiparametric transformation
-models.
+Subjects who experience the terminal event remain in a pseudo-risk set, akin
+to a cure fraction, and their unobserved censoring times are accounted for by
+inverse probability of censoring weighting (IPCW). This approach facilitates
+consistent and direct prediction of the marginal mean. In contrast, other
+approaches remove terminal events from the risk set akin to censorings. This
+methodology leads to modeling the marginal mean conditional on survival,
+which is a biased estimate for the marginal mean.
 
-| Models | Link function G(x) | Special case at param = 1 |
-|-------|---------------------|---------------------------|
-| Box-Cox transformation models (`model = "boxcox"`) | $((1 + x)^\rho - 1)/\rho$ | Ghosh–Lin ($\rho = 1$) |
-| Logarithmic transformation models (`model = "log"`) | $\log(1 + r x)/r$ | Proportional odds ($r = 1$) |
+| Models | Link function G(x) | Special cases |
+|-------|---------------------|---------------|
+| Box-Cox transformation models (`model = "boxcox"`) | $((1 + x)^\rho - 1)/\rho$ | Ghosh–Lin ($\rho = 1$); $\log(1+x)$ as $\rho \to 0$ |
+| Logarithmic transformation models (`model = "log"`) | $\log(1 + r x)/r$ | Proportional odds ($r = 1$); Ghosh–Lin as $r \to 0$ |
 
 Both are estimated via automatic differentiation using TMB, which provides
 exact gradients and fast convergence.
@@ -55,158 +64,207 @@ remotes::install_github("abellach/wnpmle")
 
 ## Quick start: bladder cancer data
 
-The package ships with a pre-processed version of the `bladder` dataset from
-the `survival` package, accessible via `bladder_prep()`.
+The bladder cancer data from the Veterans Administration Cooperative
+Urological Research Group were previously analyzed by Ghosh and Lin (2002)
+and by Zeng and Lin (2006).
+`bladder_prep()` prepares the 86 patients treated with thiotepa or placebo
+from `survival::bladder1`, with treatment, the number of tumors and the size
+of the largest tumor at baseline as covariates. The Box-Cox model with
+$\rho = 1$, i.e. the identity link $G(x) = x$, is the Ghosh–Lin model, which
+is a special case of the weighted NPMLE (Bellach and Kosorok, 2026).
 
-```{r load}
+```{r quick}
 library(wnpmle)
 
-bdata       <- bladder_prep()
-bdata_clean <- bdata[, c("id", "time", "status", "treat", "num", "size")]
-head(bdata_clean)
-```
-
----
-
-## Fitting the models
-
-### Ghosh-Lin model (Box-Cox, rho = 1)
-
-```{r fit-bc}
-fit_bc <- wnpmle_fit(
+bdata <- bladder_prep()
+fit_bladder <- wnpmle_fit(
   Surv(time, status) ~ treat + num + size,
-  data  = bdata_clean,
+  data  = bdata,
   id    = "id",
   model = "boxcox",
   rho   = 1,
-  tau   = 59,
-  se    = "sandwich_adj"
+  tau   = 59
 )
-summary(fit_bc)
-bl_bc <- baseline(fit_bc)
-plot(bl_bc$time, bl_bc$Lambda, type = "s", lwd = 2,
-     xlab = "Time (months)", ylab = expression(hat(Lambda)(t)),
-     main = "Cumulative baseline mean (Ghosh-Lin)")
-lines(bl_bc$time, bl_bc$lower, lty = 2, col = "grey50")
-lines(bl_bc$time, bl_bc$upper, lty = 2, col = "grey50")
-AIC(fit_bc)
-BIC(fit_bc)
-```
-
-### Proportional odds model (logarithmic, r = 1)
-
-```{r fit-log}
-fit_log <- wnpmle_fit(
-  Surv(time, status) ~ treat + num + size,
-  data  = bdata_clean,
-  id    = "id",
-  model = "log",
-  rho   = 1,
-  tau   = 59,
-  se    = "sandwich_adj"
-)
-summary(fit_log)
-bl_log <- baseline(fit_log)
-plot(bl_log$time, bl_log$Lambda, type = "s", lwd = 2,
-     xlab = "Time (months)", ylab = expression(hat(Lambda)(t)),
-     main = "Cumulative baseline mean (proportional odds)")
-lines(bl_log$time, bl_log$lower, lty = 2, col = "grey50")
-lines(bl_log$time, bl_log$upper, lty = 2, col = "grey50")
-AIC(fit_log)
-BIC(fit_log)
+fit_bladder
 ```
 
 ---
 
-## Prediction
+## Example: hospital readmissions after colorectal cancer surgery
 
-`predict()` evaluates the estimated marginal mean at new covariate values.
-Here we compare the mean number of recurrences over time for a treated
-vs. placebo patient, holding the number of initial tumours and tumour size
-fixed at 1.
+The readmission data (Gonzalez et al., 2005) contain repeated hospital
+readmissions of 403 patients after surgery for colorectal cancer, with death
+as competing terminal event. `readmission_prep()` returns one row per
+readmission (status 1) and one final row per patient, either death
+(status 2) or censoring (status 0). Time is measured in days since surgery.
 
-```{r predict}
-newdat <- data.frame(treat = c(0, 1), num = c(1, 1), size = c(1, 1))
-
-pred <- predict(fit_bc, newdata = newdat,
-                times = seq(1, 50, by = 1))
-
-plot(pred$time, pred$mu_1, type = "s", lwd = 2,
-     xlab = "Time (months)", ylab = "Marginal mean number of recurrences",
-     ylim = range(pred[, -1]))
-lines(pred$time, pred$mu_2, lwd = 2, lty = 2, col = "firebrick")
-legend("topleft", legend = c("Placebo", "Thiotepa"),
-       lty = c(1, 2), col = c("black", "firebrick"), bty = "n")
+```{r readmission-data}
+rdata <- readmission_prep(tau = 1460)
+head(rdata)
+table(rdata$status)
 ```
 
----
+The covariates are chemotherapy, sex, Dukes' tumor stage and the Charlson
+comorbidity index. For our analysis we set $\tau = 4$ years (1460 days):
+readmissions after $\tau$ are removed and patients still under observation
+are censored at $\tau$. At $\tau$, 25% of the patients are still followed and
+98% of the readmissions have occurred, while beyond $\tau$ the number of
+patients at risk drops rapidly (21 patients at 5 years).
 
-## Choosing the transformation parameter
+### Choosing the transformation
 
-`plot_loglik()` sweeps over a grid of parameter values and plots the profile
-log-likelihood for both models on a single axis. The logarithmic parameter r
-is shown on the left (negative axis) and the Box-Cox parameter rho on the
-right (positive axis), meeting at zero where the two models coincide.
-
-The grids and the follow-up horizon tau are user-controlled. The function
-fits `length(rho_grid) + length(r_grid)` models in total, so computation
-time scales with grid size.
+`plot_loglik()` plots the profile log-likelihood over a grid of
+transformation parameters for both model classes, with $r$ (logarithmic) on
+the left and $\rho$ (Box-Cox) on the right. The open circle marks the
+Ghosh–Lin model ($\rho = 1$), the filled circle the proportional odds model
+($r = 1$).
 
 ```{r loglik-plot, eval = FALSE}
 plot_loglik(
-  Surv(time, status) ~ treat + num + size,
-  data     = bdata_clean,
+  Surv(time, status) ~ chemo + sex + dukes + charlson,
+  data     = rdata,
   id       = "id",
-  tau      = 59,
-  rho_grid = seq(0.01, 1.2, by = 0.01),
-  r_grid   = seq(0.01, 1.2, by = 0.01)
+  tau      = 1460,
+  rho_grid = seq(0.05, 1.2, by = 0.05),
+  r_grid   = seq(0.05, 1.2, by = 0.05)
 )
 ```
 
-The filled circle marks rho = 1 (Ghosh-Lin) and the open circle marks
-r = 1 (proportional odds). The optimal parameter values are printed to the
-console.
+```{r loglik-figure, echo = FALSE, out.width = "85%", fig.align = "center"}
+knitr::include_graphics("loglik_readmission.png")
+```
+
+The maxima are at $\hat\rho \approx 0.85$ and $\hat r \approx 0.15$, both
+close to the Ghosh–Lin model. The exact optima can be found with
+`optimize()`:
+
+```{r optimize, eval = FALSE}
+f <- function(p) wnpmle_fit(Surv(time, status) ~ chemo + sex + dukes + charlson,
+                            data = rdata, id = "id", model = "boxcox", rho = p,
+                            tau = 1460, se = "none")$loglik
+optimize(f, interval = c(0.2, 1), maximum = TRUE)
+```
+
+### Fitting the selected model
+
+```{r fit-readmission}
+fit_rd <- wnpmle_fit(
+  Surv(time, status) ~ chemo + sex + dukes + charlson,
+  data  = rdata,
+  id    = "id",
+  model = "boxcox",
+  rho   = 0.85,
+  tau   = 1460,
+  se    = "sandwich_adj"
+)
+summary(fit_rd)
+```
+
+Comparison with the Ghosh–Lin and proportional odds models:
+
+```{r compare}
+fit_gl <- wnpmle_fit(Surv(time, status) ~ chemo + sex + dukes + charlson,
+                     data = rdata, id = "id", model = "boxcox", rho = 1,
+                     tau = 1460, se = "none")
+fit_po <- wnpmle_fit(Surv(time, status) ~ chemo + sex + dukes + charlson,
+                     data = rdata, id = "id", model = "log", rho = 1,
+                     tau = 1460, se = "none")
+sapply(list(boxcox_0.85 = fit_rd, ghosh_lin = fit_gl, prop_odds = fit_po), AIC)
+```
+
+In the selected model, chemotherapy, sex and Dukes' stage D have a
+significant effect on the expected number of readmissions.
+
+A positive coefficient increases and a negative coefficient decreases the
+expected number of recurrences at all times. In the Ghosh–Lin model
+($\rho = 1$), $\exp(\beta)$ is the ratio of the marginal means; in the
+proportional odds model ($r = 1$), $\exp(\beta)$ is the ratio of
+$\exp(\mu(t)) - 1$, where $\mu(t)$ is the marginal mean. For other
+transformation models, the size of the effect depends on time and is best
+illustrated with `predict()`, as shown below.
+
+### Cumulative baseline mean
+
+`baseline()` returns the cumulative baseline mean with pointwise 95%
+confidence limits.
+
+```{r baseline}
+bl <- baseline(fit_rd)
+plot(bl$time, bl$Lambda, type = "s", lwd = 2,
+     xlab = "Days since surgery", ylab = expression(hat(Lambda)(t)),
+     ylim = range(c(bl$lower, bl$upper), na.rm = TRUE))
+lines(bl$time, bl$lower, type = "s", lty = 2, col = "grey50")
+lines(bl$time, bl$upper, type = "s", lty = 2, col = "grey50")
+```
+
+### Prediction
+
+`predict()` gives the marginal mean with pointwise 95% confidence limits at
+new covariate values, here for a man with Dukes' stage C and Charlson index 0,
+with and without chemotherapy.
+
+```{r predict}
+newdat <- data.frame(chemo    = c("NonTreated", "Treated"),
+                     sex      = "Male",
+                     dukes    = "C",
+                     charlson = "0")
+pred <- predict(fit_rd, newdata = newdat, times = seq(0, 1460, by = 7))
+head(pred)
+
+plot(pred$time, pred$mu_1, type = "n",
+     xlab = "Days since surgery",
+     ylab = "Marginal mean number of readmissions",
+     ylim = range(pred[, -1]))
+polygon(c(pred$time, rev(pred$time)), c(pred$lower_1, rev(pred$upper_1)),
+        col = adjustcolor("black", 0.12), border = NA)
+polygon(c(pred$time, rev(pred$time)), c(pred$lower_2, rev(pred$upper_2)),
+        col = adjustcolor("firebrick", 0.15), border = NA)
+lines(pred$time, pred$mu_1, type = "s", lwd = 2)
+lines(pred$time, pred$mu_2, type = "s", lwd = 2, lty = 2, col = "firebrick")
+legend("topleft", legend = c("No chemotherapy", "Chemotherapy"),
+       lty = c(1, 2), col = c("black", "firebrick"), lwd = 2, bty = "n")
+```
 
 ---
 
 ## Standard errors
 
-The adjusted sandwich variance estimator accounts for the estimation of the inverse
-probability of censoring weights. Set `se = "none"` to skip SE computation,
-which is useful when profiling over a grid of transformation parameters.
-
 | Value | Description |
 |-------|-------------|
-| `"sandwich_adj"` | Sandwich variance estimator (default) |
-| `"sandwich"` | Sandwich variance estimator without adjustment (approximation) |
-| `"fisher"` | Inverse fisher information |
-| `"none"` | No standard errors, faster, useful for profiling |
+| `"sandwich_adj"` | Sandwich variance estimator with correction for the estimated censoring weights (default) |
+| `"sandwich"` | Sandwich variance estimator without the correction |
+| `"fisher"` | Inverse Fisher information |
+| `"none"` | No standard errors; faster, useful for profiling |
+
+All standard errors are computed with TMB and are fast also for large data
+sets.
 
 ---
 
-## S3 methods
+## S3 methods and helpers
 
-| Method | Description |
+| Function | Description |
 |--------|-------------|
 | `print(fit)` | Compact coefficient table with z-values and p-values |
-| `summary(fit)` | Adds cumulative baseline at tau/4, tau/2, tau |
+| `summary(fit)` | Adds the cumulative baseline at tau/4, tau/2, tau |
 | `coef(fit)` | Named coefficient vector |
 | `vcov(fit)` | Full variance-covariance matrix for (beta, Lambda) |
-| `logLik(fit)` | Log-likelihood (for use with AIC / BIC) |
-| `AIC(fit)` | Akaike information criterion |
-| `BIC(fit)` | Bayesian information criterion |
-| `baseline(fit)` | Cumulative baseline mean data frame with CIs |
+| `logLik(fit)`, `AIC(fit)`, `BIC(fit)` | Log-likelihood and information criteria |
+| `baseline(fit)` | Cumulative baseline mean with pointwise confidence limits |
 | `predict(fit, newdata)` | Marginal mean at new covariate values |
+| `plot_loglik()` | Profile log-likelihood over the transformation parameter |
+| `bladder_prep()`, `readmission_prep()` | Example data sets |
 
 ---
 
 ## References
 
-Bellach, A. and Kosorok, M.R. (2026). Weighted NPMLE for the marginal mean of recurrent events with a competing terminal event. *arXiv preprint* [arXiv:2605.25934](https://arxiv.org/abs/2605.25934).
+Bellach, A. and Kosorok, M.R. (2026). Weighted NPMLE for the marginal mean of recurrent events with a competing terminal event. *arXiv preprint* arXiv:2605.25934. [doi:10.48550/arXiv.2605.25934](https://doi.org/10.48550/arXiv.2605.25934).
 
 Bellach, A., Kosorok, M.R., Rüschendorf, L. and Fine, J.P. (2019). Weighted NPMLE for the subdistribution of a competing risk. *Journal of the American Statistical Association*, 114(525), 259–270. [doi:10.1080/01621459.2017.1401540](https://doi.org/10.1080/01621459.2017.1401540).
 
 Ghosh, D. and Lin, D.Y. (2002). Marginal regression models for recurrent and terminal events. *Statistica Sinica*, 12, 663–688. [doi:10.17615/pt0g-y207](https://doi.org/10.17615/pt0g-y207).
 
-Zeng, D. and Lin, D.Y. (2006). Semiparametric transformation models with random effects for recurrent events. *Biometrika*, 93(3), 627–640. [doi:10.1093/biomet/93.3.627](https://doi.org/10.1093/biomet/93.3.627).
+Gonzalez, J.R., Fernandez, E., Moreno, V., Ribes, J., Peris, M., Navarro, M., Cambray, M. and Borras, J.M. (2005). Sex differences in hospital readmission among colorectal cancer patients. *Journal of Epidemiology and Community Health*, 59(6), 506–511. [doi:10.1136/jech.2004.028902](https://doi.org/10.1136/jech.2004.028902).
 
+Zeng, D. and Lin, D.Y. (2006). Semiparametric transformation models with random effects for recurrent events. *Biometrika*, 93(3), 627–640. [doi:10.1093/biomet/93.3.627](https://doi.org/10.1093/biomet/93.3.627).
